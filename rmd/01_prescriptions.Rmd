@@ -1,0 +1,180 @@
+---
+title: "Prescriptions in Cumbria"
+author: "Lee Macaulay"
+date: "20/09/2018"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: readable
+---
+
+```{r setup, include=FALSE}
+# include libraries
+library(readr)
+library(dplyr)
+library(tidyr)
+library(DT)
+library(stringr)
+library(sf)
+
+cumbriarx <- read_csv("../output_data/rx_cumbriaonly.csv", col_types = cols(
+  ITEMS=col_double()
+))
+```
+
+```{r headlines, warning=F, message=F, echo=F}
+
+patients <- cumbriarx %>%
+  group_by(NAME) %>%
+  drop_na(PATIENTS) %>% 
+  summarise(total=mean(PATIENTS, na.rm = TRUE))
+
+total.rx <- sum(cumbriarx$ACT.COST)
+per.head <- sum(cumbriarx$ACT.COST) / sum(patients$total)
+
+```
+
+## Headlines 
+
+- Over **£`r prettyNum(total.rx, big.mark=",", scientfic=F)`** spent on prescription drugs by the NHS over past 12 months (to June 2018) in Cumbria
+- This equals just under **£`r strtrim(per.head, 3)`** per patient
+- Data sourced from **`r cumbriarx %>% summarise(n_distinct(NAME))`** GP practices as collected in NHS Digital's [Practice Level Prescribing monthly dataset](https://digital.nhs.uk/data-and-information/publications/statistical/practice-level-prescribing-data)
+
+## Method
+
+1. Download 12 CSV files for last 12 months of England-wide prescribing data (~1.3Gb each!)
+2. Filter the data by the two CCGs (bodies that commissions healthcare) covering Cumbria - North Cumbria CCG and Morecambe Bay CCG. Extra filtering is still needed as Morecambe Bay straddles into the next county, Lancashire. This is also where we add the name and address of each GP practice using a left_join.
+3. Download 12 CSV files of accompanying data listing registered patients at practices and join this to our filtered prescriptions data frame. This allows for 'per person' calculations.
+4. Download a CSV file of all Cumbrian postcodes (similar to zipcodes) from the [Office of National Statistics Geoportal](http://geoportal.statistics.gov.uk) and join this to our prescriptions data frame to drop the final few non-Cumbrian practices.
+
+## Data problems
+
+- Some practices have closed over the past twelve months so are reporting as na values in population. The majority of this population will have 'moved' to another practice.
+- Some figures in the ITEMS column would import as na *unless* the column was specifically declared as col_double.
+
+## Summary
+
+```{r display_practice, warning=F, message=F, echo=F}
+
+patients <- cumbriarx %>%
+  group_by(NAME) %>%
+  drop_na(PATIENTS) %>% 
+  summarise(total=mean(PATIENTS, na.rm = TRUE))
+
+surgeries <- cumbriarx %>%
+  group_by(NAME) %>% 
+  summarise("Total items prescribed"=sum(ITEMS),
+            "Total cost"=sum(ACT.COST), 
+            "Cost per person"=sum(ACT.COST)/sum(patients$total)
+            ) %>% 
+  arrange(-(`Cost per person`))
+
+datatable(surgeries) %>% 
+  formatCurrency("Total cost", currency = "£", digits = 0) %>% 
+  formatCurrency("Total items prescribed", currency = "", digits = 0) %>% 
+  formatCurrency("Cost per person", currency = "£", digits = 2)
+
+```
+
+## Antibiotics and Opioids
+
+Antibiotics and opioids are two prescription drugs currently under the spotlight. 
+
+The public body which provides expert guidance on medicines and clinical practice, the National Institute for Health and Care Excellence, has (repeatedly warned GP practices and hospitals)[https://www.nice.org.uk/news/blog/how-nice-can-help-to-encourage-responsible-antibiotic-prescribing] to prescribe fewer antibiotics in a bid to tackle antibiotic resistance.
+
+Here's a breakdown of how antibiotic prescription rates (per 1000 patients) have changed between July 2017 and June 2018:
+
+```{r antibiotics, fig.height=20, fig.width=15, warning=F, message=F, echo=F}
+
+library(ggplot2)
+library(forcats)
+
+antibiotics <- cumbriarx %>%
+  filter(str_detect(BNF.CODE, "^0501*")) %>%
+  group_by(NAME, month) %>%
+  summarise(rate=sum(ITEMS)/(mean(PATIENTS, na.rm = T)/1000)) %>%
+  mutate(lag = lag(rate, 11, order_by = c(7,8,9,10,11,12,1,2,3,4,5,6))) %>%
+  mutate(pct.change = (rate - lag) / lag * 100) %>%
+  filter(month==6) %>%
+  select(name=NAME, june2018=rate, july2017=lag, pct.change) %>% 
+  filter(!name=="ARNSIDE SURGERY") %>% 
+  mutate(mycolor = ifelse(pct.change>0, "red1", "green1"))
+
+ggplot(antibiotics, aes(x=pct.change, y=fct_reorder(name, pct.change, desc=T))) +
+  geom_segment(
+    aes(x=0,
+        xend= pct.change,
+        yend = fct_reorder(name, pct.change, desc=T)),
+        color = antibiotics$mycolor) +
+  geom_point() +
+   annotate("text", x = 25, y = "DALTON SURGERY", label = "More prescribed", color = "red1", size = 5, hjust = -0.1, vjust = .75) +
+        annotate("text", x = 25, y = "APPLEBY MEDICAL PRACTICE", label = "Fewer prescribed", color = "green1", size = 5, hjust = -0.1, vjust = -.1) +
+  geom_segment(aes(x = 25, xend = 25 , y = "WIGTON GROUP MEDICAL PRACTICE", yend = "ASPATRIA MEDICAL GROUP"),
+                     arrow = arrow(length = unit(0.2,"cm")), color = "red1") +
+        geom_segment(aes(x = 25, xend = 25 , y = "TEMPLE SOWERBY MEDICAL PRACTICE", yend = "CARLISLE HEALTHCARE"),
+                     arrow = arrow(length = unit(0.2,"cm")), color = "green1") +
+  labs(x="% change", y="GP practices",
+       title = "Antibiotic prescriptions per 1000 patients",
+       subtitle = "made by Cumbrian GP surgeries",
+       caption = "Data from NHS Digital between 07/2017-06/2018") +
+  theme_minimal() +
+  geom_text(aes(label=paste0(round(pct.change), "%")), hjust = ifelse(antibiotics$pct.change>0, -.5, 1.5)) +
+  theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_blank())
+
+```
+There is growing concern about the use of opioids for certain types of pain management because of their addictive nature. 
+
+We can see where there has been an increase, or a decrease, in the prescribing of opioids at different GP practises across Cumbria.
+
+```{r opioids, fig.height=10, fig.width=7, warning=F, message=F, echo=F}
+
+# opioids <- cumbriarx %>% 
+#   filter(str_detect(BNF.CODE, "^040702*")) %>%
+#   filter(!NAME=="BANK STREET SURGERY") %>% 
+#   group_by(NAME, month) %>%
+#   summarise(rate=sum(ITEMS)/(mean(PATIENTS, na.rm = T)/1000)) %>%
+#   mutate(lag = lag(rate, 11, order_by = c(7,8,9,10,11,12,1,2,3,4,5,6))) %>%
+#   mutate(pct.change = (rate - lag) / lag * 100) %>%
+#   filter(month==6) %>%
+#   select(name=NAME, june2018=rate, july2017=lag, pct.change) %>% 
+#   filter(!name=="ARNSIDE SURGERY")
+
+# library(ggmap)
+# 
+# addresses <- cumbriarx %>% 
+#   select(PRACTICE, NAME:POSTCODE) %>% 
+#   unique()
+# 
+# addresses <- addresses %>%
+#   mutate(location = paste0(ADDRESS, ", ", ifelse(is.na(STREET), "" , paste0(STREET, ", ")), TOWN, ", ", ifelse(is.na(COUNTY), "CUMBRIA, " , paste0(COUNTY, ", ")), POSTCODE))
+# 
+# geo <- mutate_geocode(addresses, location)
+# 
+# cumbriarx <- left_join(cumbriarx, geo, by = c("PRACTICE", "PRACTICE"))
+# opioidsgeo <- left_join(opioids, geo, by = c("name" = "NAME"))
+# 
+# cumbriageo <- read_sf("raw_data/LADistricts/Local_Authority_Districts_December_2017_Full_Clipped_Boundaries_in_United_Kingdom_WGS84.shp") %>% 
+#   filter(objectid < 72, objectid > 65)
+# 
+# opioidsgeo <- opioidsgeo %>% 
+#   mutate(mycolor = ifelse(pct.change>0, "red1", "green1"))
+ 
+opioidsgeo <- read_csv("../output_data/opioidsgeo.csv")
+cumbriageo <- read_sf("../output_data/opioidsgeo.shp")
+
+ggplot(cumbriageo) +
+  geom_sf(fill="transparent") +
+  geom_point(data=opioidsgeo, aes(x=lon, y=lat, size=pct.change), fill=opioidsgeo$mycolor, color="black", shape=21) +
+  theme_void() +
+  theme(panel.grid.major = element_line(colour = 'transparent')) +
+  labs(title = "Opioid prescriptions per 1000 patients",
+       subtitle = "made by Cumbrian GP surgeries",
+       caption = "Data from NHS Digital between 07/2017-06/2018") +
+  scale_size_continuous(name="% change") +
+  coord_sf()
+
+```
